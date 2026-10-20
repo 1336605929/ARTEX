@@ -1,0 +1,82 @@
+name: build-artex
+
+# 手动触发的构建流水线：编译前端静态资源 -> 内嵌进 Go 二进制 -> 打包 zip。
+# 不修改上游 release.yml，也不创建 Release / 不碰 Docker 镜像。
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: '构建目标，逗号分隔'
+        required: true
+        default: 'linux/amd64'
+      version:
+        description: '版本号（写入二进制与包名）'
+        required: true
+        default: 'v0.3.15'
+      upx:
+        description: '用 UPX 压缩二进制（可能影响部分环境兼容性）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端（静态导出）
+        working-directory: web
+        run: |
+          npm ci
+          npm run build:static
+
+      - name: 前端产物内嵌到 server/webui/dist
+        run: |
+          mkdir -p server/webui/dist
+          rsync -a --delete web/out/ server/webui/dist/
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: 编译并打包
+        env:
+          ARTEX_TARGETS: ${{ inputs.targets }}
+          ARTEX_BUILD_VERSION: ${{ inputs.version }}
+          ARTEX_PACKAGE: '1'
+          ARTEX_PACKAGE_DIR: dist
+          ARTEX_SKIP_FRONTEND: '1'
+          ARTEX_SKIP_NPM_CI: '1'
+          ARTEX_COMPRESS: ${{ inputs.upx && 'required' || 'off' }}
+        run: ./build.sh --release
+
+      - name: 冒烟测试 linux/amd64 二进制
+        if: contains(inputs.targets, 'linux/amd64')
+        run: |
+          set -x
+          ls -lh dist
+          ./dist/artex-linux-amd64/artex -h || true
+
+      - name: 列出产物与校验和
+        run: |
+          cat dist/SHA256SUMS || true
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: artex-${{ inputs.version }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
